@@ -1,0 +1,8 @@
+{
+  "name": "TADAmoon",
+  "description": "NASA Space Apps Challenge 2026 — Lunar Landing Site Navigator for rapid evaluation of lunar south pole lighting and direct-to-Earth communication windows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

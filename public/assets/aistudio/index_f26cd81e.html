@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Explore lunar terrain, compare landing dates, and simulate the Sun–Earth–Moon system.">
+  <title>Lunar Landing Site Navigator</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="#landing" aria-label="Lunar Navigator home">
+        <span class="brand-moon" aria-hidden="true"></span><span>Lunar Navigator</span>
+      </a>
+      <nav class="tabs" role="tablist" aria-label="Project views">
+        <button id="tab-landing" type="button" role="tab" aria-controls="landing" aria-selected="true" data-tab="landing">Landing planner</button>
+        <button id="tab-orbit" type="button" role="tab" aria-controls="orbit" aria-selected="false" tabindex="-1" data-tab="orbit">Orbit simulator</button>
+        <button id="tab-geometry" type="button" role="tab" aria-controls="geometry" aria-selected="false" tabindex="-1" data-tab="geometry">Plane geometry</button>
+      </nav>
+      <a class="method-link" href="#method">Data &amp; method</a>
+    </div>
+  </header>
+
+  <main class="shell" id="main">
+    <p id="app-status" class="notice" role="status">Loading the lunar ephemeris…</p>
+    <noscript><p class="notice">Enable JavaScript to run the simulator.</p></noscript>
+
+    <section id="landing" role="tabpanel" aria-labelledby="tab-landing">
+      <div class="intro">
+        <div>
+          <h1>Lunar Landing Site Navigator</h1>
+          <p>Explore lunar terrain and compare sunlight and Earth visibility across landing windows.</p>
+        </div>
+        <button type="button" class="secondary" id="find-date" disabled>Find best date</button>
+      </div>
+
+      <div class="input-panel card">
+        <form id="landing-form" class="input-row">
+          <label class="site-field">Landing site
+            <select id="site-select" name="site" required disabled><option>Loading sites…</option></select>
+          </label>
+          <label>Landing date &amp; time <span class="unit">UTC</span>
+            <input type="datetime-local" id="landing-date" name="date" required disabled>
+          </label>
+          <label>Mast height
+            <select id="mast" name="mast" disabled>
+              <option value="2">2 m · Rover mast</option>
+              <option value="6">6 m · Lander mast</option>
+              <option value="15">15 m · Solar array</option>
+              <option value="35">35 m · Tower</option>
+            </select>
+          </label>
+          <button type="submit" class="primary" id="apply-landing" disabled>Apply</button>
+        </form>
+        <form class="custom-row" id="coordinates" hidden>
+          <label>Latitude <span class="unit">°N</span><input id="latitude" type="number" min="-90" max="90" step="any" required></label>
+          <label>Longitude <span class="unit">°E</span><input id="longitude" type="number" min="-180" max="360" step="any" required></label>
+          <button class="secondary" type="submit">Use coordinates</button>
+        </form>
+        <details class="advanced" id="assumptions">
+          <summary>Model settings</summary>
+          <form id="model-form" class="custom-row">
+            <label>Battery endurance <span class="unit">hours</span><input id="endurance" type="number" min="1" max="1000" value="36" required></label>
+            <label>Assumed ridge distance <span class="unit">m</span><input id="ridge-distance" type="number" min="1" max="100000" value="1000" required></label>
+            <button class="secondary" type="submit">Update model</button>
+          </form>
+        </details>
+      </div>
+      <p id="landing-status" class="notice" role="status" hidden></p>
+
+      <div class="split">
+        <section class="card viewer">
+          <header class="view-head">
+            <div>
+              <h2 id="scene-site">Local terrain</h2>
+              <p class="mono" id="scene-coords">—</p>
+            </div>
+            <div class="segmented" id="terrain-cameras" role="group" aria-label="Terrain camera">
+              <button type="button" data-camera="dome" aria-pressed="true">3D</button>
+              <button type="button" data-camera="eye" aria-pressed="false">Eye level</button>
+              <button type="button" data-camera="top" aria-pressed="false">Overhead</button>
+            </div>
+          </header>
+          <div id="terrain-view" class="scene-host terrain-host" tabindex="0" role="group" aria-label="3D lunar terrain, use arrow keys to rotate and plus or minus to zoom">
+            <div class="scene-stamp"><span class="indicator"></span><span id="scene-profile">Terrain profile</span></div>
+          </div>
+          <div class="viewer-footer">
+            <div class="legend" aria-label="Terrain legend">
+              <span><i class="sun"></i>Sun</span>
+              <span><i class="earth"></i>Earth</span>
+              <label class="check"><input type="checkbox" id="show-horizon" checked> Skyline</label>
+            </div>
+            <label class="relief-label">Relief <input type="range" id="relief" min="1" max="5" step="0.5" value="3"><output id="relief-value" for="relief">3×</output></label>
+          </div>
+          <div class="transport">
+            <button type="button" class="primary play" id="landing-play" disabled>Play</button>
+            <div class="scrubber">
+              <label for="timeline" class="sr-only">Days after landing</label>
+              <input type="range" id="timeline" min="0" max="720" step="0.25" value="0" disabled>
+              <div class="timeline-text"><span>Landing</span><output id="playhead" for="timeline">—</output><span>+30 days</span></div>
+            </div>
+            <label class="speed">
+              <span class="sr-only">Playback speed</span>
+              <select id="landing-speed">
+                <option value="3">3 h/s</option>
+                <option value="12" selected>12 h/s</option>
+                <option value="24">1 d/s</option>
+                <option value="72">3 d/s</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <aside class="readouts" aria-label="Landing conditions">
+          <section class="card telemetry">
+            <h2>At playhead</h2>
+            <div class="body-reading">
+              <div class="reading-head"><span class="body-name"><i class="sun"></i>Sun</span><span class="pill neutral" id="sun-state">—</span></div>
+              <div class="angle-pair"><div><span>Altitude</span><strong id="sun-alt">—</strong></div><div><span>Skyline</span><strong id="sun-ridge">—</strong></div><div><span>Azimuth</span><strong id="sun-az">—</strong></div></div>
+              <p class="event" id="sun-event">—</p>
+            </div>
+            <div class="body-reading">
+              <div class="reading-head"><span class="body-name"><i class="earth"></i>Earth</span><span class="pill neutral" id="earth-state">—</span></div>
+              <div class="angle-pair"><div><span>Altitude</span><strong id="earth-alt">—</strong></div><div><span>Skyline</span><strong id="earth-ridge">—</strong></div><div><span>Azimuth</span><strong id="earth-az">—</strong></div></div>
+              <p class="event" id="earth-event">—</p>
+            </div>
+          </section>
+          <section class="card mission">
+            <h2>14-day landing window</h2>
+            <div class="metric"><span>Any sunlight</span><strong id="mission-sun">—</strong></div>
+            <div class="meter"><span class="sun" id="bar-sun"></span></div>
+            <div class="metric"><span>Direct Earth visibility</span><strong id="mission-earth">—</strong></div>
+            <div class="meter"><span class="earth" id="bar-earth"></span></div>
+            <div class="metric mission-dark"><span>Longest shadow</span><strong id="mission-dark">—</strong></div>
+            <p class="mission-caption" id="mission-battery">—</p>
+            <span class="pill neutral" id="mission-verdict">—</span>
+            <p class="mission-caption" id="mission-reason">—</p>
+          </section>
+        </aside>
+      </div>
+
+      <section class="card chart-panel">
+        <header class="view-head">
+          <div><h2>30-day skyline clearance</h2><p>Positive angles indicate visibility above the modeled skyline.</p></div>
+          <div class="chart-actions">
+            <button type="button" class="secondary" id="lock-scenario" disabled>Lock as scenario A</button>
+            <button type="button" class="secondary" id="export-csv" disabled>Export CSV</button>
+          </div>
+        </header>
+        <div class="chart-frame">
+          <canvas id="forecast-chart" aria-label="Sun upper limb and Earth center clearance versus days after landing. Move the playhead with the timeline slider."></canvas>
+        </div>
+        <div class="legend chart-legend">
+          <span><i class="sun"></i>Sun upper limb</span>
+          <span><i class="earth"></i>Earth center</span>
+          <span id="baseline-legend" hidden><i class="baseline"></i>Scenario A Sun</span>
+        </div>
+      </section>
+
+      <section class="card chart-panel" id="comparison" hidden>
+        <header class="view-head">
+          <div><h2>Scenario comparison</h2><p>Each scenario uses its own 14-day landing window.</p></div>
+          <button type="button" class="secondary" id="clear-scenario">Clear A</button>
+        </header>
+        <div class="table-wrap"><table>
+          <thead><tr><th scope="col">Metric</th><th scope="col">Scenario A · Locked</th><th scope="col">Scenario B · Current</th></tr></thead>
+          <tbody id="comparison-rows"></tbody>
+        </table></div>
+      </section>
+    </section>
+
+    <section id="orbit" role="tabpanel" aria-labelledby="tab-orbit" hidden>
+      <div class="intro">
+        <div><h1>Sun, Earth &amp; Moon</h1><p>Follow their changing positions and distances through the JPL DE440 ephemeris.</p></div>
+      </div>
+      <div class="card input-panel">
+        <form id="orbit-form" class="input-row orbit-inputs">
+          <label>Simulation date &amp; time <span class="unit">UTC</span><input type="datetime-local" id="orbit-date" required disabled></label>
+          <button type="submit" class="primary" id="apply-orbit" disabled>Apply</button>
+          <div class="control-group">
+            <button type="button" id="orbit-back" class="secondary" disabled>−1 day</button>
+            <button type="button" id="orbit-forward" class="secondary" disabled>+1 day</button>
+          </div>
+        </form>
+      </div>
+      <p id="orbit-status" class="notice" role="status" hidden></p>
+      <div class="split">
+        <section class="card viewer">
+          <header class="view-head">
+            <div><h2 id="orbit-scene-title">Solar system view</h2><p class="mono" id="orbit-time">—</p></div>
+            <div class="segmented" id="orbit-cameras" role="group" aria-label="Orbit camera">
+              <button type="button" data-orbit-camera="system" aria-pressed="true">System</button>
+              <button type="button" data-orbit-camera="pair" aria-pressed="false">Earth–Moon</button>
+            </div>
+          </header>
+          <div id="orbit-view" class="scene-host orbit-host" tabindex="0" role="group" aria-label="3D orbital simulation, use arrow keys to rotate and plus or minus to zoom">
+            <div class="scene-stamp"><span class="indicator"></span><span id="orbit-scale">Moon offset ×30 · enlarged bodies</span></div>
+          </div>
+          <div class="transport orbit-transport">
+            <button type="button" class="primary play" id="orbit-play" disabled>Play</button>
+            <label class="speed">Speed
+              <select id="orbit-speed"><option value="1" selected>1 day/s</option><option value="5">5 days/s</option><option value="20">20 days/s</option></select>
+            </label>
+            <label class="check"><input id="orbit-lines" type="checkbox" checked> Distance lines</label>
+          </div>
+        </section>
+        <aside class="card telemetry orbit-readouts">
+          <h2>Distances</h2>
+          <dl>
+            <div><dt>Sun → Earth</dt><dd id="sun-earth">—</dd></div>
+            <div><dt>Earth → Moon</dt><dd id="earth-moon">—</dd></div>
+            <div><dt>Sun → Moon</dt><dd id="sun-moon">—</dd></div>
+          </dl>
+          <h2>Moon’s heliocentric eccentricity</h2>
+          <strong class="mono eccentricity" id="eccentricity">—</strong>
+          <p class="mission-caption">Instantaneous osculating value for the Moon relative to the Sun.</p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="geometry" role="tabpanel" aria-labelledby="tab-geometry" hidden>
+      <div class="intro">
+        <div><h1>Three-point plane</h1><p>Enter three points to see the triangle, its incenter and its unit normal.</p></div>
+      </div>
+      <div class="split geometry-layout">
+        <section class="card geom-controls">
+          <h2>Triangle coordinates</h2>
+          <form id="triangle-form">
+            <div class="coordinates-grid">
+              <span></span><span>X</span><span>Y</span><span>Z</span>
+              <span>A</span>
+              <input aria-label="A x" name="ax" type="number" value="0" step="any" required>
+              <input aria-label="A y" name="ay" type="number" value="0" step="any" required>
+              <input aria-label="A z" name="az" type="number" value="0" step="any" required>
+              <span>B</span>
+              <input aria-label="B x" name="bx" type="number" value="6" step="any" required>
+              <input aria-label="B y" name="by" type="number" value="0" step="any" required>
+              <input aria-label="B z" name="bz" type="number" value="0" step="any" required>
+              <span>C</span>
+              <input aria-label="C x" name="cx" type="number" value="1" step="any" required>
+              <input aria-label="C y" name="cy" type="number" value="2" step="any" required>
+              <input aria-label="C z" name="cz" type="number" value="4" step="any" required>
+            </div>
+            <div class="control-group">
+              <button type="submit" class="primary">Draw plane</button>
+              <button type="button" class="secondary" id="reset-triangle">Reset example</button>
+            </div>
+          </form>
+          <p id="geometry-status" class="notice" role="status" hidden></p>
+          <dl class="geometry-results">
+            <div><dt>Area</dt><dd id="triangle-area">—</dd></div>
+            <div><dt>Incenter</dt><dd id="triangle-center">—</dd></div>
+            <div><dt>Unit normal (+Y)</dt><dd id="triangle-normal">—</dd></div>
+          </dl>
+        </section>
+        <section class="card viewer">
+          <header class="view-head"><h2>Triangle preview</h2><button id="geometry-camera" type="button" class="secondary">Reset view</button></header>
+          <div id="geometry-view" class="scene-host geometry-host" tabindex="0" role="group" aria-label="3D triangle with its incenter and normal, use arrow keys to rotate and plus or minus to zoom"></div>
+          <div class="viewer-footer legend"><span><i class="earth"></i>Triangle</span><span><i class="sun"></i>Incenter and normal</span></div>
+        </section>
+      </div>
+    </section>
+
+    <footer>
+      <details id="method">
+        <summary>Data &amp; method</summary>
+        <div class="method-body">
+          <p>The landing planner uses JPL DE421 and the DE421 lunar orientation kernels. The orbit simulator uses DE440. The browser interpolates tabulated vectors. Distances and event times are approximate.</p>
+          <p>The terrain view uses the supplied 40 × 40 elevation grids and 360-point skyline profiles. Display relief and marker size are illustrative. Reference coordinates use a flat skyline. Nearby custom points can borrow a profile within 10 km.</p>
+          <p>Clearance compares the Sun’s upper limb or Earth’s center with the local skyline. The planner uses hourly forecast samples, a modeled mast-height correction and an adjustable battery assumption. A −2° floor in the supplied profiles can make a visibility estimate uncertain.</p>
+          <p><a href="https://ssd.jpl.nasa.gov/planets/eph_export.html">NASA JPL ephemerides</a> · <a href="https://naif.jpl.nasa.gov/pub/naif/generic_kernels/">NAIF lunar kernels</a> · <a href="https://svs.gsfc.nasa.gov/4720/">NASA SVS Moon texture</a> · <a href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-map/">NASA Blue Marble Earth texture</a></p>
+        </div>
+      </details>
+    </footer>
+  </main>
+</body>
+</html>

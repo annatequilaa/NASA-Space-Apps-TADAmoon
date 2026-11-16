@@ -1,0 +1,504 @@
+import * as THREE from "./vendor/three.module.min.js";
+import { RAD, clamp, norm, scale, sub } from "./astronomy.js";
+import { CanvasRenderer } from "./canvas-renderer.js";
+
+const SUN = 0xffc675, EARTH = 0x71cefb, GREEN = 0xb7ec8b;
+const vec = (values) => new THREE.Vector3(...values);
+const colors = { sun: SUN, earth: EARTH, lander: GREEN };
+const up = new THREE.Vector3(0, 1, 0);
+
+function domePoint(altitude, azimuth, radius = 1) {
+  const a = altitude * RAD, h = azimuth * RAD;
+  return new THREE.Vector3(
+    radius * Math.cos(a) * Math.sin(h),
+    radius * Math.sin(a),
+    -radius * Math.cos(a) * Math.cos(h),
+  );
+}
+
+function createLine(points, color, opacity = 1, dashed = false) {
+  const params = { color, opacity, transparent: opacity < 1, depthWrite: false };
+  const material = dashed
+    ? new THREE.LineDashedMaterial({ ...params, dashSize: 0.013, gapSize: 0.01 })
+    : new THREE.LineBasicMaterial(params);
+  const object = new THREE.Line(new THREE.BufferGeometry(), material);
+  linePoints(object, points);
+  return object;
+}
+
+function linePoints(object, points) {
+  object.geometry.dispose();
+  object.geometry = new THREE.BufferGeometry().setFromPoints(points);
+  if (object.material.isLineDashedMaterial) object.computeLineDistances();
+}
+
+function disposableGroup(group) {
+  for (const child of [...group.children]) {
+    child.traverse((object) => {
+      object.geometry?.dispose();
+      object.material?.dispose();
+    });
+    group.remove(child);
+  }
+}
+
+function sphere(radius, material) {
+  return new THREE.Mesh(new THREE.SphereGeometry(radius, 32, 24), material);
+}
+
+function starField(scene, extent = 3.8) {
+  let seed = 3481;
+  const random = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const stars = new Float32Array(950 * 3);
+  for (let i = 0; i < stars.length; i++) stars[i] = extent * (2 * random() - 1);
+  const geometry = new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(stars, 3));
+  scene.add(new THREE.Points(geometry, new THREE.PointsMaterial({
+    color: 0x99b0ce, size: 1.25, opacity: 0.38, transparent: true, depthWrite: false, sizeAttenuation: false,
+  })));
+}
+
+class Viewport {
+  constructor(host, preset) {
+    this.host = host;
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 30);
+    this.labels = new Map();
+    this.target = new THREE.Vector3();
+    this.renderer = new CanvasRenderer();
+    this.renderer.domElement.setAttribute("aria-hidden", "true");
+    this.labelsHost = document.createElement("div");
+    this.labelsHost.className = "scene-labels";
+    this.labelsHost.setAttribute("aria-hidden", "true");
+    host.append(this.renderer.domElement, this.labelsHost);
+    this.bindPointer();
+    this.resize = new ResizeObserver(() => this.render());
+    this.resize.observe(host);
+    this.setCamera(preset);
+  }
+
+  setCamera({ yaw, pitch, span }) {
+    this.yaw = yaw;
+    this.pitch = pitch;
+    this.span = span;
+    this.zoom = 1;
+    this.render();
+  }
+
+  bindPointer() {
+    const canvas = this.renderer.domElement;
+    let drag;
+    canvas.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || event.button !== 0) return;
+      drag = { x: event.clientX, y: event.clientY };
+      canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      if (!drag || !event.isPrimary) return;
+      this.yaw -= (event.clientX - drag.x) * 0.008;
+      this.pitch = clamp(this.pitch + (event.clientY - drag.y) * 0.008, -1.48, 1.565);
+      drag = { x: event.clientX, y: event.clientY };
+      this.render();
+    });
+    canvas.addEventListener("lostpointercapture", () => { drag = null; });
+    canvas.addEventListener("dblclick", () => { this.zoom = 1; this.render(); });
+    canvas.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      this.adjustZoom(Math.exp(-clamp(event.deltaY, -200, 200) * 0.0035));
+    }, { passive: false });
+    this.host.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft") this.yaw -= 0.13;
+      else if (event.key === "ArrowRight") this.yaw += 0.13;
+      else if (event.key === "ArrowUp") this.pitch = clamp(this.pitch + 0.13, -1.48, 1.565);
+      else if (event.key === "ArrowDown") this.pitch = clamp(this.pitch - 0.13, -1.48, 1.565);
+      else if (event.key === "+" || event.key === "=") this.adjustZoom(1.15);
+      else if (event.key === "-") this.adjustZoom(1 / 1.15);
+      else return;
+      event.preventDefault();
+      this.render();
+    });
+  }
+
+  adjustZoom(factor) {
+    this.zoom = clamp(this.zoom * factor, 0.55, 3.8);
+    this.render();
+  }
+
+  label(id, text, position, type = "", visible = true, offset = 0) {
+    if (!this.labels.has(id)) {
+      const element = document.createElement("span");
+      element.className = `marker-label ${type}`;
+      this.labelsHost.append(element);
+      this.labels.set(id, { element });
+    }
+    const label = this.labels.get(id);
+    label.position = position;
+    label.visible = visible;
+    label.offset = offset;
+    if (label.element.textContent !== text) label.element.textContent = text;
+  }
+
+  render() {
+    const { clientWidth: width, clientHeight: height } = this.host;
+    if (!width || !height) return;
+    if (this.width !== width || this.height !== height) {
+      this.renderer.setSize(width, height);
+      this.width = width;
+      this.height = height;
+    }
+    const aspect = width / height;
+    const range = this.span / this.zoom;
+    const x = range * Math.max(1, aspect), y = range * Math.max(1, 1 / aspect);
+    Object.assign(this.camera, { left: -x, right: x, bottom: -y, top: y });
+    const eye = new THREE.Vector3(
+      Math.sin(this.yaw) * Math.cos(this.pitch),
+      Math.sin(this.pitch),
+      Math.cos(this.yaw) * Math.cos(this.pitch),
+    );
+    this.camera.position.copy(this.target).addScaledVector(eye, 5);
+    this.camera.lookAt(this.target);
+    this.camera.updateProjectionMatrix();
+    this.renderer.render(this.scene, this.camera);
+    for (const { element, position, visible, offset } of this.labels.values()) {
+      const projected = position.clone().project(this.camera);
+      element.hidden = !visible || Math.abs(projected.x) > .95 || Math.abs(projected.y) > .96 || Math.abs(projected.z) > 1;
+      if (element.hidden) continue;
+      element.style.left = `${(projected.x + 1) * width / 2}px`;
+      element.style.top = `${(1 - projected.y) * height / 2 + offset}px`;
+    }
+  }
+}
+
+const terrainCameras = {
+  dome: { yaw: 0.43, pitch: 0.63, span: 0.99 },
+  eye: { yaw: 0, pitch: 0.085, span: 1.09 },
+  top: { yaw: 0, pitch: 1.565, span: 1.14 },
+};
+
+function smoothGrid(mesh) {
+  const n = mesh.length;
+  return mesh.map((row, r) => row.map((height, c) => {
+    const left = row[Math.max(0, c - 1)], right = row[Math.min(n - 1, c + 1)];
+    const previous = mesh[Math.max(0, r - 1)][c], next = mesh[Math.min(n - 1, r + 1)][c];
+    return height * 0.60 + (left + right + previous + next) * 0.10;
+  }));
+}
+
+function surfaceData(mesh, relief) {
+  const grid = smoothGrid(mesh);
+  const n = grid.length, rings = 43, sectors = 96;
+  const values = grid.flat();
+  const low = Math.min(...values), high = Math.max(...values);
+  const verticalScale = 0.155 * relief / Math.max(420, Math.abs(low), Math.abs(high));
+  function rawHeight(x, z) {
+    const c = clamp((x + 1) * (n - 1) / 2, 0, n - 1);
+    const r = clamp((1 - z) * (n - 1) / 2, 0, n - 1);
+    const i = Math.min(Math.floor(r), n - 2), j = Math.min(Math.floor(c), n - 2);
+    const a = r - i, b = c - j;
+    return (1 - a) * ((1 - b) * grid[i][j] + b * grid[i][j + 1])
+      + a * ((1 - b) * grid[i + 1][j] + b * grid[i + 1][j + 1]);
+  }
+  const origin = rawHeight(0, 0);
+  const positions = [], vertexColors = [], indices = [];
+  for (let r = 0; r <= rings; r++) {
+    const radius = r / rings;
+    const taper = 1 - 0.65 * radius ** 8;
+    for (let s = 0; s < sectors; s++) {
+      const angle = 2 * Math.PI * s / sectors;
+      const x = radius * Math.sin(angle), z = -radius * Math.cos(angle);
+      const elevation = rawHeight(x, z);
+      positions.push(x, (elevation - origin) * verticalScale * taper, z);
+      const luminance = 0.135 + 0.14 * ((elevation - low) / Math.max(35, high - low));
+      vertexColors.push(luminance * 1.04, luminance, luminance * 0.95);
+      if (r === rings) continue;
+      const a = r * sectors + s, b = r * sectors + (s + 1) % sectors;
+      indices.push(a, b + sectors, a + sectors, a, b, b + sectors);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(vertexColors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  const skirt = [], skirtIndices = [];
+  for (let s = 0; s < sectors; s++) {
+    const j = (rings * sectors + s) * 3;
+    const [x, y, z] = positions.slice(j, j + 3);
+    skirt.push(x, y, z, x, y - .055, z);
+    const a = s * 2, b = ((s + 1) % sectors) * 2;
+    skirtIndices.push(a, b, a + 1, b, b + 1, a + 1);
+  }
+  const edge = new THREE.BufferGeometry();
+  edge.setAttribute("position", new THREE.Float32BufferAttribute(skirt, 3));
+  edge.setIndex(skirtIndices);
+  edge.computeVertexNormals();
+  return { geometry, edge };
+}
+
+export class TerrainScene extends Viewport {
+  constructor(host) {
+    super(host, terrainCameras.dome);
+    this.target.y = 0.13;
+    this.scene.userData.staticTerrain = true;
+    this.scene.userData.terrainRevision = 0;
+    starField(this.scene);
+    this.surface = new THREE.Group();
+    this.scene.add(this.surface);
+    for (const altitude of [0, 30, 60]) {
+      this.scene.add(createLine(Array.from({ length: 121 }, (_, i) => domePoint(altitude, i * 3)),
+        altitude === 0 ? 0x7b9cbc : 0x81a0c6, altitude === 0 ? 0.53 : 0.28, altitude !== 0));
+    }
+    for (const [i, direction] of ["N", "E", "S", "W"].entries()) {
+      this.label(direction, direction, domePoint(1, i * 90, 1.08));
+    }
+    this.skyline = createLine([], 0xdab784, 0.83);
+    this.skyline.renderOrder = 1;
+    this.scene.add(this.skyline);
+    this.markers = {};
+    for (const key of ["sun", "earth"]) {
+      const marker = sphere(key === "sun" ? 0.035 : 0.028, new THREE.MeshBasicMaterial({
+        color: colors[key], toneMapped: false, depthTest: false, depthWrite: false, transparent: true,
+      }));
+      marker.renderOrder = 5;
+      marker.userData.animated = true;
+      const ray = createLine([], colors[key], 0.6, true);
+      ray.material.depthTest = false;
+      ray.renderOrder = 3;
+      ray.userData.animated = true;
+      this.scene.add(marker, ray);
+      this.markers[key] = { marker, ray };
+    }
+    const mast = new THREE.Mesh(
+      new THREE.CylinderGeometry(.008, .014, .066, 8),
+      new THREE.MeshBasicMaterial({ color: GREEN, toneMapped: false }),
+    );
+    mast.position.y = .035;
+    const lander = new THREE.Mesh(
+      new THREE.CylinderGeometry(.035, .046, .019, 8),
+      new THREE.MeshBasicMaterial({ color: 0xadc88a, toneMapped: false }),
+    );
+    lander.position.y = .009;
+    this.scene.add(mast, lander);
+    this.label("lander", "Lander", new THREE.Vector3(0, .082, 0), "lander", true, -4);
+    this.render();
+  }
+
+  preset(name) {
+    this.setCamera(terrainCameras[name]);
+  }
+
+  setSurface(mesh, relief, horizon) {
+    this.scene.userData.terrainRevision++;
+    disposableGroup(this.surface);
+    if (mesh) {
+      const { geometry, edge } = surfaceData(mesh, relief);
+      this.surface.add(
+        new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98 })),
+        new THREE.Mesh(edge, new THREE.MeshStandardMaterial({ color: 0x2a303a, roughness: 0.98, side: THREE.DoubleSide })),
+      );
+    } else {
+      const plane = new THREE.Mesh(new THREE.CircleGeometry(1, 96),
+        new THREE.MeshStandardMaterial({ color: 0x384250, roughness: 0.95, transparent: true, opacity: .48 }));
+      plane.rotation.x = -Math.PI / 2;
+      this.surface.add(plane);
+    }
+    linePoints(this.skyline, Array.from({ length: 361 }, (_, i) => domePoint(horizon[i % 360], i, 1.006)));
+    this.render();
+  }
+
+  setHorizonVisible(visible) {
+    this.skyline.visible = visible;
+    this.scene.userData.terrainRevision++;
+    this.render();
+  }
+
+  update(bodies) {
+    for (const [key, { marker, ray }] of Object.entries(this.markers)) {
+      const body = bodies[key], visible = body.clearance > 0;
+      const position = domePoint(body.alt, body.az, 1.02);
+      marker.position.copy(position);
+      marker.material.opacity = visible ? 1 : 0.48;
+      ray.material.opacity = visible ? 0.68 : 0.27;
+      const array = ray.geometry.attributes.position;
+      if (!array || array.count !== 2) linePoints(ray, [new THREE.Vector3(0, .02, 0), position]);
+      else {
+        array.setXYZ(1, position.x, position.y, position.z);
+        array.needsUpdate = true;
+        ray.computeLineDistances();
+        ray.geometry.computeBoundingSphere();
+      }
+      this.label(key, key === "sun" ? "Sun" : "Earth", position, key, true, key === "sun" ? -14 : 25);
+    }
+    this.render();
+  }
+}
+
+const orbitCameras = {
+  system: { yaw: 0.20, pitch: 0.72, span: 1.13 },
+  pair: { yaw: 0.20, pitch: 0.63, span: .112 },
+};
+
+function toOrbitVector([x, y, z]) {
+  const ecliptic = 23.43928 * RAD;
+  return new THREE.Vector3(x, z * Math.cos(ecliptic) - y * Math.sin(ecliptic),
+    -(y * Math.cos(ecliptic) + z * Math.sin(ecliptic)));
+}
+
+export class OrbitScene extends Viewport {
+  constructor(host) {
+    super(host, orbitCameras.system);
+    this.mode = "system";
+    starField(this.scene);
+    this.sun = sphere(.072, new THREE.MeshBasicMaterial({ color: SUN, toneMapped: false }));
+    const glowCanvas = document.createElement("canvas");
+    glowCanvas.width = glowCanvas.height = 128;
+    const context = glowCanvas.getContext("2d");
+    const gradient = context.createRadialGradient(64, 64, 10, 64, 64, 64);
+    gradient.addColorStop(0, "rgba(255, 208, 131, .8)");
+    gradient.addColorStop(.47, "rgba(255, 177, 78, .45)");
+    gradient.addColorStop(1, "rgba(255, 171, 76, 0)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 128, 128);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(glowCanvas), depthWrite: false, toneMapped: false,
+    }));
+    glow.scale.set(.45, .45, 1);
+    glow.renderOrder = -1;
+    this.sun.add(glow);
+    this.earth = sphere(.023, new THREE.MeshStandardMaterial({ color: 0x5baedd, roughness: .86 }));
+    this.moon = sphere(.0125, new THREE.MeshStandardMaterial({ color: 0xb9b5b1, roughness: 1 }));
+    const loader = new THREE.TextureLoader();
+    for (const [mesh, file] of [[this.earth, "earth.jpg"], [this.moon, "moon.jpg"]]) {
+      loader.load(`./assets/${file}`, (image) => {
+        image.colorSpace = THREE.SRGBColorSpace;
+        mesh.material.map = image;
+        mesh.material.color.set(0xffffff);
+        mesh.material.needsUpdate = true;
+        this.render();
+      }, undefined, () => {});
+    }
+    this.earthPath = createLine([], 0x6f93b4, .56);
+    this.moonPath = createLine([], 0x899bab, .57);
+    this.distanceLines = [
+      createLine([], SUN, .52), createLine([], EARTH, .65), createLine([], 0xdfa889, .53),
+    ];
+    this.showLines = true;
+    this.scene.add(this.sun, this.earth, this.moon, this.earthPath, this.moonPath, ...this.distanceLines);
+  }
+
+  setMode(mode) {
+    this.mode = mode;
+    this.earth.scale.setScalar(mode === "pair" ? .78 : 1);
+    this.moon.scale.setScalar(mode === "pair" ? .39 : 1);
+    this.setCamera(orbitCameras[mode]);
+  }
+
+  updatePaths(fixedEarthPath, moonOffsetPath) {
+    linePoints(this.earthPath, fixedEarthPath.map(toOrbitVector));
+    linePoints(this.moonPath, moonOffsetPath.map((offset) => toOrbitVector(scale(offset, 30))));
+  }
+
+  setLines(visible) {
+    this.showLines = visible;
+  }
+
+  update(positions) {
+    const pair = this.mode === "pair";
+    const earth = pair ? new THREE.Vector3() : toOrbitVector(positions.earth.position);
+    const moon = earth.clone().add(toOrbitVector(scale(positions.lunar.position, 30)));
+    const sun = new THREE.Vector3();
+    this.earth.position.copy(earth);
+    this.moon.position.copy(moon);
+    this.sun.visible = !pair;
+    this.earthPath.visible = !pair;
+    this.moonPath.position.copy(earth);
+    for (const [i, points] of [[sun, earth], [earth, moon], [sun, moon]].entries()) {
+      this.distanceLines[i].visible = this.showLines && (!pair || i === 1);
+      if (this.distanceLines[i].visible) linePoints(this.distanceLines[i], points);
+    }
+    this.label("sun", "Sun", sun, "sun", !pair, -21);
+    const radiusInPixels = this.host.clientHeight * this.zoom / (2 * this.span);
+    const earthRadius = this.earth.geometry.parameters.radius * this.earth.scale.x * radiusInPixels;
+    const moonRadius = this.moon.geometry.parameters.radius * this.moon.scale.x * radiusInPixels;
+    this.label("earth", "Earth", earth, "earth", true, -earthRadius - 4);
+    this.label("moon", "Moon", moon, "", true, moonRadius + 16);
+    this.render();
+  }
+}
+
+const geometryCamera = { yaw: .65, pitch: .92, span: 1.14 };
+
+export class GeometryScene extends Viewport {
+  constructor(host) {
+    super(host, geometryCamera);
+    this.objects = new THREE.Group();
+    this.scene.add(this.objects);
+    const grid = new THREE.GridHelper(2.05, 12, 0x4b5c6c, 0x293342);
+    grid.material.color.set(0x4b5c6c);
+    grid.material.opacity = .55;
+    grid.position.y = -0.57;
+    this.scene.add(grid);
+  }
+
+  reset() {
+    this.setCamera(geometryCamera);
+  }
+
+  update(points, geometry) {
+    disposableGroup(this.objects);
+    for (const label of this.labels.values()) label.visible = false;
+    if (!geometry) {
+      this.render();
+      return;
+    }
+    const normalized = points.map((point) => scale(sub(point, geometry.incenter), 1.70 / geometry.scale));
+    const xyz = normalized.map(vec);
+    const triangle = new THREE.BufferGeometry().setFromPoints(xyz);
+    triangle.computeVertexNormals();
+    this.objects.add(new THREE.Mesh(triangle, new THREE.MeshStandardMaterial({
+      color: EARTH, side: THREE.DoubleSide, opacity: .64, transparent: true,
+    })));
+    this.objects.add(createLine([...xyz, xyz[0]], EARTH));
+    for (const [i, point] of xyz.entries()) {
+      const vertex = sphere(.026, new THREE.MeshBasicMaterial({ color: EARTH, toneMapped: false }));
+      vertex.position.copy(point);
+      this.objects.add(vertex);
+      const name = "ABC"[i];
+      this.label(name, name, point, "earth", true, -5);
+    }
+    const origin = new THREE.Vector3();
+    this.objects.add(sphere(.026, new THREE.MeshBasicMaterial({ color: SUN, toneMapped: false })));
+    const arrowLength = clamp(norm(normalized[0]) * 0.72, .32, .64);
+    const normal = vec(geometry.normal);
+    this.objects.add(new THREE.ArrowHelper(normal, origin, arrowLength, SUN, .105, .052));
+    this.label("incenter", "I", origin, "sun", true, 13);
+    this.label("normal", "n", normal.clone().multiplyScalar(arrowLength), "sun", true, -3);
+
+    const systemOrigin = geometry.incenter.map((value) => value === 0 ? 0 : -value * 1.70 / geometry.scale);
+    if (norm(systemOrigin) < 0.96) {
+      const axisColors = [0xe78f8d, 0x9fd792, 0x83b9eb];
+      for (const [i, letter] of ["X", "Y", "Z"].entries()) {
+        const axis = i === 1 ? up : vec(i === 0 ? [1, 0, 0] : [0, 0, 1]);
+        const axesOrigin = vec(systemOrigin);
+        this.objects.add(new THREE.ArrowHelper(axis, axesOrigin, .43, axisColors[i], .07, .035));
+        this.label(letter, letter, axesOrigin.addScaledVector(axis, .47), "", true, 0);
+      }
+    }
+    this.render();
+  }
+}
+
+export function mountScene(Scene, host) {
+  try {
+    return new Scene(host);
+  } catch (error) {
+    console.error(error);
+    const message = document.createElement("p");
+    message.className = "scene-error";
+    message.textContent = "The 3D view is unavailable in this browser. You can still use the numerical results.";
+    host.append(message);
+    return null;
+  }
+}
